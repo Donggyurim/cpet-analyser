@@ -1,0 +1,3 @@
+([('CPET_Analyser',
+   '/Users/monash1/Documents/CPET updated 21052026/dist/CPET_Analyser',
+   'EXECUTABLE')],)
