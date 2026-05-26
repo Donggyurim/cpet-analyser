@@ -179,6 +179,18 @@ def last_zero_load_before_exercise(ws, start: int, end: int, load_col: int = COL
             candidates.append(row)
     return candidates[-1] if candidates else None
 
+def zero_load_window_before_exercise(ws, start: int, end: int, load_col: int = COL_LOAD) -> Tuple[int, int]:
+    first_exercise_row = first_load_gt_zero_row(ws, start, end, load_col)
+    search_end = first_exercise_row - 1 if first_exercise_row else end
+    zero_rows: List[int] = []
+    for row in range(start, search_end + 1):
+        load = to_number(ws.cell(row, load_col).value)
+        if load == 0:
+            zero_rows.append(row)
+    if not zero_rows:
+        raise CPETAnalysisError("Could not find any Load = 0 rows in the 5s averaged pre-exercise section.")
+    return zero_rows[0], zero_rows[-1]
+
 def max_load_row(ws, start: int, end: int, load_col: int = COL_LOAD) -> int:
     max_value = None
     max_row = None
@@ -205,20 +217,20 @@ def write_rolling_average_formulas(ws, start: int, end: int) -> None:
         ws.cell(row, COL_VO2KG_ROLLING).number_format = "0.0"
 
 def apply_basic_style(ws) -> None:
-    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["A"].width = 24
     for col in range(2, 15):
         ws.column_dimensions[get_column_letter(col)].width = 12
     bold = Font(bold=True)
     title_fill = PatternFill("solid", fgColor="D9EAF7")
     thin_gray = Side(style="thin", color="BFBFBF")
     border = Border(left=thin_gray, right=thin_gray, top=thin_gray, bottom=thin_gray)
-    for row in [1, 5]:
+    for row in [1, 6]:
         ws.cell(row, 1).font = bold
         ws.cell(row, 1).fill = title_fill
-    for row in range(1, 15):
+    for row in range(1, 16):
         ws.cell(row, 1).alignment = Alignment(horizontal="left")
         ws.cell(row, 2).number_format = "0.0"
-    ws.cell(10, 2).number_format = "0.00"
+    ws.cell(11, 2).number_format = "0.00"
     for label in ["5s AVERAGED DATA", "BP DATA", "BREATH x BREATH DATA"]:
         try:
             r = find_row(ws, label)
@@ -262,6 +274,8 @@ def process_cpet(uploaded_file):
 
     pre_hr_end = last_zero_load_before_exercise(ws, five["start"], five["end"], load_col=COL_LOAD)
     pre_bp_row = last_zero_load_before_exercise(ws, bp["start"], bp["end"], load_col=COL_LOAD)
+    resting_vo2_start, resting_vo2_end = zero_load_window_before_exercise(ws, five["start"], five["end"], load_col=COL_LOAD)
+    
     peak_5s_row = max_load_row(ws, five["start"], five["end"], load_col=COL_LOAD)
     peak_bp_row = max_load_row(ws, bp["start"], bp["end"], load_col=COL_LOAD)
     peak_bxb_row = max_load_row(ws, bxb["start"], bxb["end"], load_col=COL_LOAD)
@@ -278,16 +292,17 @@ def process_cpet(uploaded_file):
         (2, "HR", f"=AVERAGE(C{five['start']}:C{pre_hr_end})"),
         (3, "Sys", f"=E{pre_bp_row}"),
         (4, "Dia", f"=F{pre_bp_row}"),
-        (5, "Peak Values", None),
-        (6, "HR", f"=MAX(C{bxb['start']}:C{peak_bxb_row})"),
-        (7, "Load (W)", f"=MAX(B{bxb['start']}:B{bxb['end']})"),
-        (8, "VO2 (mL/min)", f"=MAX(G{five['start']}:G{peak_5s_row})"),
-        (9, "VO2 (mL/min)/kg", f"=MAX(K{five['start']}:K{peak_5s_row})"),
-        (10, "RER", f"=AVERAGE(I{last30_start}:I{peak_5s_row})"),
-        (11, "V'E", f"=AVERAGE(D{last30_start}:D{peak_5s_row})"),
-        (12, "O2 pulse", f"=AVERAGE(L{last30_start}:L{peak_5s_row})"),
-        (13, "Sys", f"=E{peak_bp_row}"),
-        (14, "Dia", f"=F{peak_bp_row}"),
+        (5, "Resting VO2 (mL/kg/min)", f"=AVERAGE(K{resting_vo2_start}:K{resting_vo2_end})"),
+        (6, "Peak Values", None),
+        (7, "HR", f"=MAX(C{bxb['start']}:C{peak_bxb_row})"),
+        (8, "Load (W)", f"=MAX(B{bxb['start']}:B{bxb['end']})"),
+        (9, "VO2 (mL/min)", f"=MAX(G{five['start']}:G{peak_5s_row})"),
+        (10, "VO2 (mL/min)/kg", f"=MAX(K{five['start']}:K{peak_5s_row})"),
+        (11, "RER", f"=AVERAGE(I{last30_start}:I{peak_5s_row})"),
+        (12, "V'E", f"=AVERAGE(D{last30_start}:D{peak_5s_row})"),
+        (13, "O2 pulse", f"=AVERAGE(L{last30_start}:L{peak_5s_row})"),
+        (14, "Sys", f"=E{peak_bp_row}"),
+        (15, "Dia", f"=F{peak_bp_row}"),
     ]
 
     for row, label, formula in summary_rows:

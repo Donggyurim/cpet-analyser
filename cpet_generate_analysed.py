@@ -299,6 +299,47 @@ def last_zero_load_before_exercise(
     return candidates[-1] if candidates else None
 
 
+def zero_load_window_before_exercise(
+    ws,
+    start: int,
+    end: int,
+    load_col: int = COL_LOAD,
+) -> Tuple[int, int]:
+    """
+    Return the first and last 5s averaged rows where Load = 0
+    before exercise starts.
+
+    This allows resting VO2 to use a normal Excel AVERAGE formula,
+    rather than AVERAGEIF.
+
+    Example formula generated later:
+        =AVERAGE(K42:K65)
+
+    where column K is the created VO2/kg rolling-average column.
+    """
+    first_exercise_row = first_load_gt_zero_row(ws, start, end, load_col)
+
+    if first_exercise_row:
+        search_end = first_exercise_row - 1
+    else:
+        search_end = end
+
+    zero_rows: List[int] = []
+
+    for row in range(start, search_end + 1):
+        load = to_number(ws.cell(row, load_col).value)
+
+        if load == 0:
+            zero_rows.append(row)
+
+    if not zero_rows:
+        raise CPETAnalysisError(
+            "Could not find any Load = 0 rows in the 5s averaged pre-exercise section."
+        )
+
+    return zero_rows[0], zero_rows[-1]
+
+
 def max_load_row(ws, start: int, end: int, load_col: int = COL_LOAD) -> int:
     """
     Return the LAST row where the maximum load occurs.
@@ -345,7 +386,7 @@ def write_rolling_average_formulas(ws, start: int, end: int) -> None:
 
 def apply_basic_style(ws) -> None:
     """Make the workbook visually close to the manually analysed file."""
-    ws.column_dimensions["A"].width = 22
+    ws.column_dimensions["A"].width = 24
 
     for col in range(2, 15):
         ws.column_dimensions[get_column_letter(col)].width = 12
@@ -361,16 +402,19 @@ def apply_basic_style(ws) -> None:
     )
 
     # Summary block styling.
-    for row in [1, 5]:
+    # Row 1 = Pre-exercise heading.
+    # Row 6 = Peak Values heading because Resting VO2 was added to row 5.
+    for row in [1, 6]:
         ws.cell(row, 1).font = bold
         ws.cell(row, 1).fill = title_fill
 
-    for row in range(1, 15):
+    for row in range(1, 16):
         ws.cell(row, 1).alignment = Alignment(horizontal="left")
         ws.cell(row, 2).number_format = "0.0"
 
     # RER summary value as 2 decimal places.
-    ws.cell(10, 2).number_format = "0.00"
+    # RER is row 11 because Resting VO2 was added above Peak Values.
+    ws.cell(11, 2).number_format = "0.00"
 
     # Block headings and headers.
     for label in ["5s AVERAGED DATA", "BP DATA", "BREATH x BREATH DATA"]:
@@ -400,8 +444,8 @@ def build_analysed_workbook(input_path: Path, output_path: Path) -> None:
     ws.insert_rows(1, SUMMARY_ROWS)
 
     # Insert calculated rolling-average columns globally.
-    ws.insert_cols(COL_VO2_ROLLING, 1)       # G, beside VO2 in F
-    ws.insert_cols(COL_VO2KG_ROLLING, 1)    # K, beside VO2/kg now in J
+    ws.insert_cols(COL_VO2_ROLLING, 1)       # G, beside VO2 in F.
+    ws.insert_cols(COL_VO2KG_ROLLING, 1)    # K, beside VO2/kg now in J.
 
     # Detect 5s block after row/column insertion.
     five = block_rows(ws, "5s AVERAGED DATA", "BP DATA")
@@ -463,7 +507,16 @@ def build_analysed_workbook(input_path: Path, output_path: Path) -> None:
         load_col=COL_LOAD,
     )
 
-    # These now return the LAST row where maximum load occurs.
+    # Resting VO2 window from 5s averaged rows where Load = 0.
+    # This lets us use a normal AVERAGE formula on column K.
+    resting_vo2_start, resting_vo2_end = zero_load_window_before_exercise(
+        ws,
+        five["start"],
+        five["end"],
+        load_col=COL_LOAD,
+    )
+
+    # These return the LAST row where maximum load occurs.
     peak_5s_row = max_load_row(
         ws,
         five["start"],
@@ -508,25 +561,32 @@ def build_analysed_workbook(input_path: Path, output_path: Path) -> None:
         (2, "HR", f"=AVERAGE(C{five['start']}:C{pre_hr_end})"),
         (3, "Sys", f"=E{pre_bp_row}"),
         (4, "Dia", f"=F{pre_bp_row}"),
-        (5, "Peak Values", None),
 
-        # Peak HR now includes all BxB data up to the LAST peak-load row.
-        (6, "HR", f"=MAX(C{bxb['start']}:C{peak_bxb_row})"),
+        # Resting VO2 from the CREATED VO2/kg rolling-average column.
+        # This now uses normal AVERAGE, not AVERAGEIF.
+        # Column K = VO2/kg rolling average.
+        # The row window was already selected to include only Load = 0 rows.
+        (5, "Resting VO2 (mL/kg/min)", f"=AVERAGE(K{resting_vo2_start}:K{resting_vo2_end})"),
 
-        (7, "Load (W)", f"=MAX(B{bxb['start']}:B{bxb['end']})"),
+        (6, "Peak Values", None),
+
+        # Peak HR includes all BxB data up to the LAST peak-load row.
+        (7, "HR", f"=MAX(C{bxb['start']}:C{peak_bxb_row})"),
+
+        (8, "Load (W)", f"=MAX(B{bxb['start']}:B{bxb['end']})"),
 
         # VO2 and VO2/kg rolling-average maxima up to the LAST peak-load row.
-        (8, "VO2 (mL/min)", f"=MAX(G{five['start']}:G{peak_5s_row})"),
-        (9, "VO2 (mL/min)/kg", f"=MAX(K{five['start']}:K{peak_5s_row})"),
+        (9, "VO2 (mL/min)", f"=MAX(G{five['start']}:G{peak_5s_row})"),
+        (10, "VO2 (mL/min)/kg", f"=MAX(K{five['start']}:K{peak_5s_row})"),
 
         # Final 30 sec = 6 rows ending at the LAST peak-load row.
-        (10, "RER", f"=AVERAGE(I{last30_start}:I{peak_5s_row})"),
-        (11, "V'E", f"=AVERAGE(D{last30_start}:D{peak_5s_row})"),
-        (12, "O2 pulse", f"=AVERAGE(L{last30_start}:L{peak_5s_row})"),
+        (11, "RER", f"=AVERAGE(I{last30_start}:I{peak_5s_row})"),
+        (12, "V'E", f"=AVERAGE(D{last30_start}:D{peak_5s_row})"),
+        (13, "O2 pulse", f"=AVERAGE(L{last30_start}:L{peak_5s_row})"),
 
         # Peak BP from the LAST row where peak load occurs in BP block.
-        (13, "Sys", f"=E{peak_bp_row}"),
-        (14, "Dia", f"=F{peak_bp_row}"),
+        (14, "Sys", f"=E{peak_bp_row}"),
+        (15, "Dia", f"=F{peak_bp_row}"),
     ]
 
     for row, label, formula in summary_rows:
@@ -543,6 +603,7 @@ def build_analysed_workbook(input_path: Path, output_path: Path) -> None:
     wb.save(output_path)
 
     print(f"Removed irregular 5s rows: {removed_5s_rows}")
+    print(f"Resting VO2 formula window: rows {resting_vo2_start}:{resting_vo2_end}")
     print(f"5s peak-load row used: {peak_5s_row}")
     print(f"BP peak-load row used: {peak_bp_row}")
     print(f"BxB peak-load row used: {peak_bxb_row}")

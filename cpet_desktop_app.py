@@ -3,6 +3,7 @@ from tkinter import filedialog, messagebox, ttk
 import csv
 import re
 import os
+import io
 from datetime import datetime, time, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -11,10 +12,10 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 from openpyxl.utils import get_column_letter
 
-# --- CORE LOGIC FROM cpet_generate_analysed.py ---
+# --- UPDATED CORE LOGIC FROM cpet_generate_analysed.py ---
 
 SUMMARY_ROWS = 15
-ROLLING_WINDOW_ROWS = 6  # 30 seconds in the 5-sec averaged file
+ROLLING_WINDOW_ROWS = 6
 
 COL_TIME = 1
 COL_LOAD = 2
@@ -100,12 +101,37 @@ def remove_irregular_5s_rows(ws, start: int, end: int) -> int:
             deleted += 1
     return deleted
 
+def first_load_gt_zero_row(ws, start: int, end: int) -> Optional[int]:
+    for row in range(start, end + 1):
+        load = to_number(ws.cell(row, COL_LOAD).value)
+        if load is not None and load > 0: return row
+    return None
+
+def last_zero_load_before_exercise(ws, start: int, end: int) -> Optional[int]:
+    first_ex = first_load_gt_zero_row(ws, start, end)
+    search_end = first_ex - 1 if first_ex else end
+    last_z = None
+    for row in range(start, search_end + 1):
+        if to_number(ws.cell(row, COL_LOAD).value) == 0: last_z = row
+    return last_z
+
+def zero_load_window_before_exercise(ws, start: int, end: int) -> Tuple[int, int]:
+    first_ex = first_load_gt_zero_row(ws, start, end)
+    search_end = first_ex - 1 if first_ex else end
+    zero_rows = []
+    for row in range(start, search_end + 1):
+        if to_number(ws.cell(row, COL_LOAD).value) == 0: zero_rows.append(row)
+    if not zero_rows: raise CPETAnalysisError("No Load=0 rows found in pre-exercise.")
+    return zero_rows[0], zero_rows[-1]
+
 def max_load_row(ws, start: int, end: int) -> int:
-    m_val, m_row = -1.0, -1
+    m_val, m_row = None, None
     for row in range(start, end + 1):
         v = to_number(ws.cell(row, COL_LOAD).value)
-        if v is not None and v >= m_val: m_val, m_row = v, row
-    if m_row == -1: raise CPETAnalysisError("No numeric load values found.")
+        if v is not None:
+            if m_val is None or v > m_val: m_val, m_row = v, row
+            elif v == m_val: m_row = row
+    if m_row is None: raise CPETAnalysisError("No numeric load values found.")
     return m_row
 
 def process_file(input_path: Path):
@@ -129,30 +155,27 @@ def process_file(input_path: Path):
         ws.cell(row, COL_VO2_ROLLING).number_format = "0.0"
         ws.cell(row, COL_VO2KG_ROLLING).number_format = "0.0"
 
+    for r in [five, bxb]:
+        for c in [COL_VO2_ROLLING, COL_VO2KG_ROLLING]:
+            ws.cell(r["header"], c).value = ws.cell(r["unit"], c).value = None
+
     p5, pbp, pbx = max_load_row(ws, five["start"], five["end"]), max_load_row(ws, bp["start"], bp["end"]), max_load_row(ws, bxb["start"], bxb["end"])
-    
-    # Simple pre-exercise HR detection (average of 0 load rows at start)
-    pre_hr_end = five["start"]
-    for r in range(five["start"], five["end"]+1):
-        if to_number(ws.cell(r, COL_LOAD).value) == 0: pre_hr_end = r
-        else: break
-    
-    pre_bp_row = bp["start"]
-    for r in range(bp["start"], bp["end"]+1):
-        if to_number(ws.cell(r, COL_LOAD).value) == 0: pre_bp_row = r
-        else: break
+    pre_hr_end = last_zero_load_before_exercise(ws, five["start"], five["end"])
+    pre_bp_row = last_zero_load_before_exercise(ws, bp["start"], bp["end"])
+    rv_s, rv_e = zero_load_window_before_exercise(ws, five["start"], five["end"])
 
     l30 = max(five["start"], p5 - 5)
     summary = [
         (1, "Pre-exercise", None), (2, "HR", f"=AVERAGE(C{five['start']}:C{pre_hr_end})"),
         (3, "Sys", f"=E{pre_bp_row}"), (4, "Dia", f"=F{pre_bp_row}"),
-        (5, "Peak Values", None), (6, "HR", f"=MAX(C{bxb['start']}:C{pbx})"),
-        (7, "Load (W)", f"=MAX(B{bxb['start']}:B{bxb['end']})"),
-        (8, "VO2 (mL/min)", f"=MAX(G{five['start']}:G{p5})"),
-        (9, "VO2 (mL/min)/kg", f"=MAX(K{five['start']}:K{p5})"),
-        (10, "RER", f"=AVERAGE(I{l30}:I{p5})"), (11, "V'E", f"=AVERAGE(D{l30}:D{p5})"),
-        (12, "O2 pulse", f"=AVERAGE(L{l30}:L{p5})"),
-        (13, "Sys", f"=E{pbp}"), (14, "Dia", f"=F{pbp}")
+        (5, "Resting VO2 (mL/kg/min)", f"=AVERAGE(K{rv_s}:K{rv_e})"),
+        (6, "Peak Values", None), (7, "HR", f"=MAX(C{bxb['start']}:C{pbx})"),
+        (8, "Load (W)", f"=MAX(B{bxb['start']}:B{bxb['end']})"),
+        (9, "VO2 (mL/min)", f"=MAX(G{five['start']}:G{p5})"),
+        (10, "VO2 (mL/min)/kg", f"=MAX(K{five['start']}:K{p5})"),
+        (11, "RER", f"=AVERAGE(I{l30}:I{p5})"), (12, "V'E", f"=AVERAGE(D{l30}:D{p5})"),
+        (13, "O2 pulse", f"=AVERAGE(L{l30}:L{p5})"),
+        (14, "Sys", f"=E{pbp}"), (15, "Dia", f"=F{pbp}")
     ]
     for r, lab, form in summary:
         ws.cell(r, 1).value = lab
@@ -160,9 +183,11 @@ def process_file(input_path: Path):
     
     # Styling
     bold, fill = Font(bold=True), PatternFill("solid", fgColor="D9EAF7")
-    for r in [1, 5]: ws.cell(r, 1).font, ws.cell(r, 1).fill = bold, fill
-    for r in range(1, 15): ws.cell(r, 2).number_format = "0.0"
-    ws.cell(10, 2).number_format = "0.00"
+    for r in [1, 6]: ws.cell(r, 1).font, ws.cell(r, 1).fill = bold, fill
+    for r in range(1, 16): ws.cell(r, 1).alignment = Alignment(horizontal="left"); ws.cell(r, 2).number_format = "0.0"
+    ws.cell(11, 2).number_format = "0.00"
+    ws.column_dimensions["A"].width = 24
+    ws.freeze_panes = "A16"
     
     wb.save(output_path)
     return output_path, removed
